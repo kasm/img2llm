@@ -1,0 +1,13 @@
+I want you to create a web app (frontend only) which will take one or several images and convert them to the text string which will contain JSON with following format:
+{ images: [ {
+descr: "string with descirbtion of image1",
+base64: "here is base64 presentation"
+},
+{
+descr: "string with descirbtion of image2",
+base64: "here is base64 presentation"
+},
+]
+}
+
+The web app should allow to convert images to JSON and JSON to images, both directions. You may ask questions

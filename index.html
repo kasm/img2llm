@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>img2llm</title>
+<meta name="description" content="Pack images into a single JSON text payload for an LLM prompt, and unpack them again.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- APP:START -->
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">img<span class="brand-2">2</span>llm</span>
+      <span class="brand-sub">images &#8644; JSON payload</span>
+    </div>
+
+    <div class="modes" role="tablist" aria-label="Conversion direction">
+      <button type="button" class="mode is-on" id="tab-encode" role="tab" aria-selected="true" aria-controls="pane-encode" data-mode="encode">
+        Images <span class="mode-arrow" aria-hidden="true">&#8594;</span> JSON
+      </button>
+      <button type="button" class="mode" id="tab-decode" role="tab" aria-selected="false" aria-controls="pane-decode" data-mode="decode">
+        JSON <span class="mode-arrow" aria-hidden="true">&#8594;</span> Images
+      </button>
+    </div>
+  </header>
+
+  <main class="panes">
+
+    <!-- ============ ENCODE ============ -->
+    <section class="pane" id="pane-encode" role="tabpanel" aria-labelledby="tab-encode">
+      <div class="col col-in">
+
+        <div class="drop" id="dropzone" tabindex="0" role="button" aria-label="Add images: browse files">
+          <svg class="drop-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="2.5" y="4.5" width="19" height="15" rx="2" stroke="currentColor" stroke-width="1.4"/>
+            <circle cx="8.5" cy="10" r="1.7" fill="currentColor"/>
+            <path d="M3 16.2l4.7-4.1 4 3.4 3.6-3.1L21 16.6" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
+          <p class="drop-title">Drop images here</p>
+          <p class="drop-sub"><span class="link">browse files</span> &#183; or paste with Ctrl&#8202;+&#8202;V</p>
+          <input type="file" id="fileInput" accept="image/*" multiple hidden>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head"><h2 class="panel-h">Encoding</h2></div>
+          <div class="fields">
+            <label class="field">
+              <span class="field-k">Max dimension</span>
+              <select id="maxDim">
+                <option value="0">Original</option>
+                <option value="512">512 px</option>
+                <option value="768">768 px</option>
+                <option value="1024">1024 px</option>
+                <option value="1568">1568 px</option>
+                <option value="2048">2048 px</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-k">Format</span>
+              <select id="format">
+                <option value="original">Keep original</option>
+                <option value="image/jpeg">JPEG</option>
+                <option value="image/webp">WebP</option>
+                <option value="image/png">PNG</option>
+              </select>
+            </label>
+            <label class="field field-wide" id="qualityField">
+              <span class="field-k">Quality <b class="field-v" id="qualityVal">82</b></span>
+              <input type="range" id="quality" min="30" max="100" step="1" value="82">
+            </label>
+          </div>
+          <p class="hint" id="encHint">Quality applies to JPEG and WebP. Re-encoding to JPEG flattens transparency onto white.</p>
+        </section>
+
+        <section class="panel panel-grow">
+          <div class="panel-head">
+            <h2 class="panel-h">Images <span class="badge" id="countBadge">0</span></h2>
+            <button type="button" class="btn btn-quiet" id="clearAll">Clear all</button>
+          </div>
+          <ul class="items" id="imgList"></ul>
+        </section>
+      </div>
+
+      <div class="col col-out">
+        <div class="readout" id="readout">
+          <div class="stat"><span class="stat-k">Images</span><span class="stat-v" id="stImages">0</span></div>
+          <div class="stat"><span class="stat-k">Payload</span><span class="stat-v" id="stSize">0 B</span></div>
+          <div class="stat"><span class="stat-k">&#8776; Tokens</span><span class="stat-v" id="stTokens">0</span></div>
+          <div class="meter">
+            <div class="meter-track"><i class="meter-fill" id="meterFill" style="width:0%"></i></div>
+            <span class="meter-lab" id="stCtx">0% of a 200K context</span>
+          </div>
+        </div>
+
+        <div class="outwrap">
+          <div class="outbar">
+            <span class="outbar-k">payload.json</span>
+            <div class="outbar-actions">
+              <label class="check"><input type="checkbox" id="prettyToggle" checked> Pretty</label>
+              <button type="button" class="btn" id="downloadJson">Download</button>
+              <button type="button" class="btn btn-accent" id="copyJson">Copy</button>
+            </div>
+          </div>
+          <textarea class="code" id="jsonOut" readonly spellcheck="false" aria-label="JSON payload"></textarea>
+          <p class="hint hint-foot" id="outHint"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ DECODE ============ -->
+    <section class="pane" id="pane-decode" role="tabpanel" aria-labelledby="tab-decode" hidden>
+      <div class="col col-in">
+        <section class="panel panel-grow">
+          <div class="panel-head">
+            <h2 class="panel-h">Payload</h2>
+            <div class="head-actions">
+              <button type="button" class="btn btn-quiet" id="useEncoded">Use encoder output</button>
+              <button type="button" class="btn btn-quiet" id="clearJson">Clear</button>
+            </div>
+          </div>
+          <textarea class="code code-in" id="jsonIn" spellcheck="false" aria-label="JSON to decode"
+            placeholder='{ "images": [ { "descr": "...", "base64": "data:image/png;base64,iVBORw0KGgo..." } ] }'></textarea>
+          <p class="hint" id="parseHint">Paste a payload, or drop a .json file here. Unquoted keys, single quotes, trailing commas and ```json fences are all tolerated.</p>
+        </section>
+      </div>
+
+      <div class="col col-out">
+        <div class="readout">
+          <div class="stat"><span class="stat-k">Decoded</span><span class="stat-v" id="dcCount">0</span></div>
+          <div class="stat"><span class="stat-k">Total</span><span class="stat-v" id="dcSize">0 B</span></div>
+          <div class="readout-actions">
+            <button type="button" class="btn" id="downloadZip" disabled>Download all (.zip)</button>
+          </div>
+        </div>
+        <div class="gallery" id="gallery"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span class="status-msg" id="status">Ready</span>
+    <span class="status-note">Everything runs in this browser tab &#8212; no image ever leaves your machine.</span>
+  </footer>
+</div>
+
+<dialog class="lightbox" id="lightbox">
+  <form method="dialog"><button class="lb-close" aria-label="Close">&#215;</button></form>
+  <img id="lbImg" alt="">
+  <p class="lb-cap" id="lbCap"></p>
+</dialog>
+<!-- APP:END -->
+<script src="app.js"></script>
+</body>
+</html>
