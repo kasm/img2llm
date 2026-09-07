@@ -20,7 +20,10 @@
       <span class="brand-sub">images &#8644; JSON payload</span>
     </div>
 
-    <div class="modes" role="tablist" aria-label="Conversion direction">
+    <div class="modes" role="tablist" aria-label="Conversion stage">
+      <button type="button" class="mode" id="tab-split" role="tab" aria-selected="false" aria-controls="pane-split" data-mode="split">
+        Sheet <span class="mode-arrow" aria-hidden="true">&#8594;</span> Images
+      </button>
       <button type="button" class="mode is-on" id="tab-encode" role="tab" aria-selected="true" aria-controls="pane-encode" data-mode="encode">
         Images <span class="mode-arrow" aria-hidden="true">&#8594;</span> JSON
       </button>
@@ -31,6 +34,110 @@
   </header>
 
   <main class="panes">
+
+    <!-- ============ SPLIT ============ -->
+    <section class="pane" id="pane-split" role="tabpanel" aria-labelledby="tab-split" hidden>
+      <div class="col col-in">
+
+        <div class="drop" id="sheetDrop" tabindex="0" role="button" aria-label="Add a sheet: browse files">
+          <svg class="drop-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="2.5" y="3.5" width="19" height="17" rx="2" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M2.5 12h19M13 3.5v17" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.6 2.2"/>
+          </svg>
+          <p class="drop-title">Drop a sheet here</p>
+          <p class="drop-sub"><span class="link">browse files</span> &#183; one image holding many</p>
+          <input type="file" id="sheetInput" accept="image/*" hidden>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="panel-h">Detection</h2>
+            <button type="button" class="btn btn-quiet" id="reDetect" disabled>Re-detect</button>
+          </div>
+          <div class="fields">
+            <label class="field field-wide">
+              <span class="field-k">Mode</span>
+              <select id="detectMode">
+                <option value="gutters">Auto &#183; gutters</option>
+                <option value="blobs">Auto &#183; blobs</option>
+                <option value="grid">Grid</option>
+                <option value="manual">Manual only</option>
+              </select>
+            </label>
+
+            <div class="field" data-for="auto">
+              <span class="field-k">Background</span>
+              <div class="bgrow">
+                <input type="color" id="bgColor" value="#000000" aria-label="Background colour">
+                <button type="button" class="btn btn-quiet" id="bgPick" title="Click a background pixel on the sheet">Pick</button>
+              </div>
+            </div>
+            <label class="field" data-for="auto">
+              <span class="field-k">Tolerance <b class="field-v" id="tolVal">12</b></span>
+              <input type="range" id="tol" min="0" max="60" step="1" value="12">
+            </label>
+
+            <label class="field" data-for="auto">
+              <span class="field-k">Min gutter <b class="field-v" id="gutVal">3 px</b></span>
+              <input type="range" id="minGutter" min="1" max="40" step="1" value="3">
+            </label>
+            <label class="field" data-for="auto">
+              <span class="field-k">Min piece <b class="field-v" id="minVal">1.0%</b></span>
+              <input type="range" id="minArea" min="1" max="200" step="1" value="10">
+            </label>
+
+            <label class="field" data-for="grid">
+              <span class="field-k">Rows</span>
+              <input type="number" class="num" id="gridRows" min="1" max="24" value="2">
+            </label>
+            <label class="field" data-for="grid">
+              <span class="field-k">Columns</span>
+              <input type="number" class="num" id="gridCols" min="1" max="24" value="2">
+            </label>
+
+            <label class="field">
+              <span class="field-k">Padding <b class="field-v" id="padVal">0 px</b></span>
+              <input type="range" id="pad" min="-30" max="30" step="1" value="0">
+            </label>
+            <div class="field" data-for="auto">
+              <span class="field-k">Strips</span>
+              <label class="check"><input type="checkbox" id="mergeThin" checked> Merge thin</label>
+            </div>
+          </div>
+          <p class="hint" id="detectHint">Gutters cuts the sheet on bands of flat background &#8212; it copes with panels of unequal size.</p>
+        </section>
+
+        <section class="panel panel-grow">
+          <div class="panel-head">
+            <h2 class="panel-h">Pieces <span class="badge" id="pieceBadge">0</span></h2>
+            <div class="head-actions">
+              <button type="button" class="btn btn-quiet" id="addBox" disabled>Add box</button>
+              <button type="button" class="btn btn-quiet" id="clearBoxes" disabled>Clear</button>
+            </div>
+          </div>
+          <ul class="items" id="pieceList"></ul>
+        </section>
+      </div>
+
+      <div class="col col-out">
+        <div class="readout">
+          <div class="stat"><span class="stat-k">Sheet</span><span class="stat-v" id="spSheet">&#8212;</span></div>
+          <div class="stat"><span class="stat-k">Pieces</span><span class="stat-v" id="spCount">0</span></div>
+          <div class="readout-actions">
+            <button type="button" class="btn" id="splitZip" disabled>Download all (.zip)</button>
+            <button type="button" class="btn btn-accent" id="toEncoder" disabled>Send to encoder &#8594;</button>
+          </div>
+        </div>
+
+        <div class="stage" id="stage">
+          <div class="stage-wrap" id="stageWrap" hidden>
+            <img id="sheetImg" alt="The sheet being split">
+            <div class="boxes" id="boxes"></div>
+          </div>
+        </div>
+        <p class="hint hint-foot" id="stageHint">Drag inside a box to move it, a corner to resize, on bare sheet to draw a new one. <span class="dl-note"></span></p>
+      </div>
+    </section>
 
     <!-- ============ ENCODE ============ -->
     <section class="pane" id="pane-encode" role="tabpanel" aria-labelledby="tab-encode">

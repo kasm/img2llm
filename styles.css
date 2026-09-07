@@ -348,3 +348,69 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:4px 0 0}
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
 }
+
+/* ============================================================
+   SPLIT STAGE - sheet on a stage, editable crop boxes over it
+   ============================================================ */
+.num{
+  font-family:var(--mono);font-size:13px;color:var(--ink);
+  background:var(--surface-2);border:1px solid var(--line-2);border-radius:4px;
+  padding:6px 8px;width:100%;
+}
+.bgrow{display:flex;gap:6px;align-items:center}
+.bgrow input[type=color]{
+  width:34px;height:30px;padding:0;flex:none;cursor:pointer;
+  background:var(--surface-2);border:1px solid var(--line-2);border-radius:4px;
+}
+.bgrow .btn{flex:1}
+.bgrow .btn.is-on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.field[hidden]{display:none}
+
+.stage{
+  flex:1;min-height:0;overflow:auto;padding:14px;
+  display:flex;align-items:flex-start;justify-content:center;
+  background:var(--surface-3);border:1px solid var(--line);border-radius:var(--r);
+}
+.stage:has(.stage-wrap[hidden])::after{
+  content:"The sheet appears here with its detected pieces outlined.";
+  color:var(--muted);font-size:12.5px;align-self:center;
+}
+.stage.is-picking{cursor:crosshair}
+.stage-wrap{position:relative;line-height:0;box-shadow:var(--shadow);max-width:100%}
+.stage-wrap img{display:block;max-width:100%;height:auto}
+.boxes{position:absolute;inset:0;touch-action:none;cursor:crosshair}
+.stage.is-picking .boxes{cursor:crosshair}
+
+.box{
+  position:absolute;box-sizing:border-box;cursor:move;
+  border:1.5px solid var(--accent);
+  box-shadow:0 0 0 1px rgba(255,255,255,.5) inset;
+  background:rgba(201,60,34,.08);
+}
+.box.is-on{
+  border-color:var(--accent);background:rgba(201,60,34,.16);
+  box-shadow:0 0 0 1px rgba(255,255,255,.6) inset, 0 0 0 2px var(--accent-soft);
+}
+.box-n{
+  position:absolute;top:0;left:0;line-height:1.5;
+  font-family:var(--mono);font-size:10px;padding:0 4px;
+  background:var(--accent);color:var(--accent-ink);pointer-events:none;
+}
+.hnd{
+  position:absolute;width:11px;height:11px;box-sizing:border-box;
+  background:var(--surface);border:1.5px solid var(--accent);border-radius:2px;
+}
+.hnd-nw{left:-6px;top:-6px;cursor:nwse-resize}
+.hnd-ne{right:-6px;top:-6px;cursor:nesw-resize}
+.hnd-sw{left:-6px;bottom:-6px;cursor:nesw-resize}
+.hnd-se{right:-6px;bottom:-6px;cursor:nwse-resize}
+.box:not(.is-on) .hnd{opacity:0}
+.box:hover .hnd{opacity:1}
+
+.item-pc{grid-area:body;font-family:var(--mono);font-size:11px;color:var(--muted);align-self:center}
+.chip-sel{background:var(--accent);color:var(--accent-ink)}
+
+@media (max-width:900px){
+  .stage{min-height:300px}
+}
+.item.is-sel{border-color:var(--accent);background:var(--accent-soft)}

@@ -141,6 +141,722 @@
     } catch (e) { /* nothing to recover — prefs are a convenience */ }
   }
 
+  /* =========================================================== SPLIT   */
+  /* One composite "sheet" is analysed at reduced resolution, but every
+     crop box is held in normalised 0..1 coordinates — so the overlay, the
+     piece list and the full-resolution crops all agree with no scale
+     factor to keep in step. */
+
+  var ANALYSIS_MAX = 1000;   // long side of the analysis raster
+  var GUTTER_INK = 0.02;     // a scan line under 2% ink counts as empty
+  var SLIVER = 6;            // long:short beyond this reads as a caption bar
+
+  var HINTS = {
+    gutters: 'Cuts the sheet on bands of flat background, over and over — panels of unequal size are fine. Raise Min gutter if it cuts inside a picture.',
+    blobs: 'Crops the bounding box of each island of non-background pixels. Tightest crops; best for photos scanned together on a flatbed.',
+    grid: 'Slices into equal rows and columns. Nothing is measured, so it is exact whenever the sheet really is a regular grid.',
+    manual: 'Drag on the sheet to draw each piece by hand.'
+  };
+
+  var sheet = {
+    name: '', mime: 'image/png', src: '', img: null,
+    w: 0, h: 0, aw: 0, ah: 0, ascale: 1, data: null,
+    bg: [0, 0, 0], boxes: [], sel: null, picking: false
+  };
+
+  var sopt = {
+    mode: 'gutters', tol: 12, minGutter: 3, minArea: 10,
+    rows: 2, cols: 2, pad: 0, mergeThin: true
+  };
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function rgb2hex(c) {
+    return '#' + [c[0], c[1], c[2]].map(function (v) {
+      return clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0');
+    }).join('');
+  }
+
+  function hex2rgb(s) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(s || '');
+    if (!m) return [0, 0, 0];
+    var n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  /* ------------------------------------------------------ sheet intake */
+
+  function loadSheet(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type) && !/\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name)) {
+      setStatus('That is not an image file.', 'bad');
+      return;
+    }
+    setStatus('Reading ' + file.name + '…');
+    readAsDataURL(file).then(function (src) {
+      return loadImage(src).then(function (img) {
+        sheet.name = file.name;
+        sheet.mime = file.type || dataUrlMime(src) || 'image/png';
+        if (RASTER.indexOf(sheet.mime) < 0) sheet.mime = 'image/png';
+        sheet.src = src;
+        sheet.img = img;
+        sheet.w = img.naturalWidth || 0;
+        sheet.h = img.naturalHeight || 0;
+        if (!sheet.w || !sheet.h) throw new Error('no dimensions');
+
+        $('#sheetImg').src = src;
+        $('#stageWrap').hidden = false;
+        $('#spSheet').textContent = sheet.w + '×' + sheet.h;
+
+        analyseSheet();
+        sheet.bg = autoBackground();
+        $('#bgColor').value = rgb2hex(sheet.bg);
+        syncFields();
+        detect();
+      });
+    }).then(null, function () {
+      setStatus('Could not read that image.', 'bad');
+    });
+  }
+
+  function analyseSheet() {
+    var s = Math.min(1, ANALYSIS_MAX / Math.max(sheet.w, sheet.h));
+    var aw = Math.max(1, Math.round(sheet.w * s));
+    var ah = Math.max(1, Math.round(sheet.h * s));
+    var c = document.createElement('canvas');
+    c.width = aw; c.height = ah;
+    var x = c.getContext('2d', { willReadFrequently: true });
+    x.drawImage(sheet.img, 0, 0, aw, ah);
+    sheet.aw = aw; sheet.ah = ah; sheet.ascale = aw / sheet.w;
+    sheet.data = x.getImageData(0, 0, aw, ah).data;
+  }
+
+  /* The most common colour around the rim of the sheet, refined to the
+     true average of the pixels that landed in the winning 5-bit bucket. */
+  function autoBackground() {
+    var d = sheet.data, aw = sheet.aw, ah = sheet.ah;
+    var hist = {}, best = -1, bestN = 0, x, y;
+
+    function key(p) { return ((d[p] >> 3) << 10) | ((d[p + 1] >> 3) << 5) | (d[p + 2] >> 3); }
+    function rim(fn) {
+      for (x = 0; x < aw; x++) { fn(x * 4); fn(((ah - 1) * aw + x) * 4); }
+      for (y = 0; y < ah; y++) { fn(y * aw * 4); fn((y * aw + aw - 1) * 4); }
+    }
+
+    rim(function (p) {
+      var k = key(p), n = hist[k] = (hist[k] || 0) + 1;
+      if (n > bestN) { bestN = n; best = k; }
+    });
+    if (best < 0) return [255, 255, 255];
+
+    var sr = 0, sg = 0, sb = 0, n2 = 0;
+    rim(function (p) {
+      if (key(p) !== best) return;
+      sr += d[p]; sg += d[p + 1]; sb += d[p + 2]; n2++;
+    });
+    return n2 ? [sr / n2, sg / n2, sb / n2] : [255, 255, 255];
+  }
+
+  /* 1 where the pixel differs from the background beyond the tolerance */
+  function inkMask() {
+    var d = sheet.data, n = sheet.aw * sheet.ah, m = new Uint8Array(n);
+    var br = sheet.bg[0], bgg = sheet.bg[1], bb = sheet.bg[2];
+    var t = sopt.tol * 2.55;
+    for (var i = 0, p = 0; i < n; i++, p += 4) {
+      if (d[p + 3] < 16) continue;              /* transparent reads as background */
+      var a = d[p] - br; if (a < 0) a = -a;
+      var b = d[p + 1] - bgg; if (b < 0) b = -b;
+      var c = d[p + 2] - bb; if (c < 0) c = -c;
+      if (b > a) a = b;
+      if (c > a) a = c;
+      if (a > t) m[i] = 1;
+    }
+    return m;
+  }
+
+  /* --------------------------------------------------- gutters: XY-cut */
+
+  /* Ink per row and per column inside a rect, in one cache-friendly pass. */
+  function profiles(mask, r) {
+    var aw = sheet.aw, w = r[2] - r[0], h = r[3] - r[1];
+    var rows = new Int32Array(h), cols = new Int32Array(w), i, j;
+    for (j = 0; j < h; j++) {
+      var base = (r[1] + j) * aw + r[0], c = 0;
+      for (i = 0; i < w; i++) if (mask[base + i]) { c++; cols[i]++; }
+      rows[j] = c;
+    }
+    return { rows: rows, cols: cols };
+  }
+
+  /* The longest interior run of near-empty lines. Runs touching either end
+     are outer margin, not a gutter, so they never become a cut. */
+  function bestGap(prof, span, minRun) {
+    var lim = Math.floor(span * GUTTER_INK), best = null, i = 0, n = prof.length;
+    while (i < n) {
+      if (prof[i] > lim) { i++; continue; }
+      var s = i;
+      while (i < n && prof[i] <= lim) i++;
+      if (s > 0 && i < n && (i - s) >= minRun && (!best || (i - s) > best.len)) {
+        best = { at: (s + i) >> 1, len: i - s };
+      }
+    }
+    return best;
+  }
+
+  function xyCut(mask, r, out, depth) {
+    var w = r[2] - r[0], h = r[3] - r[1];
+    var minRun = Math.max(2, Math.round(sopt.minGutter * sheet.ascale));
+    var minPx = (sopt.minArea / 1000) * sheet.aw * sheet.ah;
+    /* A cut leaves the perpendicular dimension untouched, so a band already
+       thinner than a plausible piece must not be diced any further — this
+       is what stops a caption bar breaking apart at its word gaps. */
+    var minSide = Math.max(minRun * 2, Math.round(0.5 * Math.sqrt(minPx)));
+
+    if (depth > 8 || w < minRun * 2 || h < minRun * 2) { out.push(r); return; }
+
+    var p = profiles(mask, r);
+    var g = w >= minSide ? bestGap(p.rows, w, minRun) : null;   /* cut across */
+    var v = h >= minSide ? bestGap(p.cols, h, minRun) : null;   /* cut down   */
+
+    var use, axis;
+    if (g && v) { if (g.len >= v.len) { use = g; axis = 'y'; } else { use = v; axis = 'x'; } }
+    else if (g) { use = g; axis = 'y'; }
+    else if (v) { use = v; axis = 'x'; }
+    else { out.push(r); return; }
+
+    if (axis === 'y') {
+      var cy = r[1] + use.at;
+      xyCut(mask, [r[0], r[1], r[2], cy], out, depth + 1);
+      xyCut(mask, [r[0], cy, r[2], r[3]], out, depth + 1);
+    } else {
+      var cx = r[0] + use.at;
+      xyCut(mask, [r[0], r[1], cx, r[3]], out, depth + 1);
+      xyCut(mask, [cx, r[1], r[2], r[3]], out, depth + 1);
+    }
+  }
+
+  /* Shrink a rect off its empty margin; null when there is nothing in it. */
+  function trimRect(mask, r) {
+    var p = profiles(mask, r), w = r[2] - r[0], h = r[3] - r[1];
+    var limR = Math.floor(w * GUTTER_INK), limC = Math.floor(h * GUTTER_INK);
+    var t = 0, b = h - 1, l = 0, e = w - 1;
+    while (t <= b && p.rows[t] <= limR) t++;
+    while (b >= t && p.rows[b] <= limR) b--;
+    while (l <= e && p.cols[l] <= limC) l++;
+    while (e >= l && p.cols[e] <= limC) e--;
+    if (t > b || l > e) return null;
+    return [r[0] + l, r[1] + t, r[0] + e + 1, r[1] + b + 1];
+  }
+
+  function span(a0, a1, b0, b1) {
+    var lo = a0 > b0 ? a0 : b0, hi = a1 < b1 ? a1 : b1;
+    return hi > lo ? hi - lo : 0;
+  }
+
+  /* Fold undersized pieces, and caption-shaped slivers, into the piece they
+     belong to. A sliver only merges when a single neighbour covers most of
+     its long edge — a caption shared by two panels stays a piece of its own
+     rather than being annexed by an arbitrary one of them. */
+  function mergeSmall(rects) {
+    var minPx = (sopt.minArea / 1000) * sheet.aw * sheet.ah;
+    var list = rects.slice(), guard = 0;
+
+    while (list.length > 1 && guard++ < 400) {
+      var idx = -1, i, a, w, h;
+      for (i = 0; i < list.length; i++) {
+        a = list[i];
+        if (a.keep) continue;
+        w = a[2] - a[0]; h = a[3] - a[1];
+        if (w * h < minPx || (sopt.mergeThin && (w / h > SLIVER || h / w > SLIVER))) { idx = i; break; }
+      }
+      if (idx < 0) break;
+
+      a = list[idx];
+      w = a[2] - a[0]; h = a[3] - a[1];
+      var wide = w >= h, best = -1, bestScore = 0;
+      for (i = 0; i < list.length; i++) {
+        if (i === idx) continue;
+        var b = list[i];
+        var cover = wide ? span(a[0], a[2], b[0], b[2]) / w : span(a[1], a[3], b[1], b[3]) / h;
+        if (cover < 0.6) continue;
+        var gap = wide
+          ? Math.max(0, a[1] - b[3], b[1] - a[3])
+          : Math.max(0, a[0] - b[2], b[0] - a[2]);
+        var score = cover / (1 + gap);
+        if (score > bestScore) { bestScore = score; best = i; }
+      }
+
+      if (best < 0) {
+        if (w * h < minPx) list.splice(idx, 1); else a.keep = true;
+        continue;
+      }
+      var t = list[best];
+      list[best] = [Math.min(a[0], t[0]), Math.min(a[1], t[1]), Math.max(a[2], t[2]), Math.max(a[3], t[3])];
+      list.splice(idx, 1);
+    }
+    list.forEach(function (r) { delete r.keep; });
+    return list;
+  }
+
+  /* Reading order: band the rects into rows, then left to right in each. */
+  function sortReading(rects) {
+    var sorted = rects.slice().sort(function (a, b) { return a[1] - b[1] || a[0] - b[0]; });
+    var out = [], row = [], bottom = 0;
+    function flush() {
+      row.sort(function (a, b) { return a[0] - b[0]; });
+      out = out.concat(row);
+      row = [];
+    }
+    sorted.forEach(function (r) {
+      if (row.length && r[1] >= bottom) flush();
+      bottom = row.length ? Math.min(bottom, r[3]) : r[3];
+      row.push(r);
+    });
+    flush();
+    return out;
+  }
+
+  function cutRects(mask) {
+    var leaves = [], trimmed = [];
+    xyCut(mask, [0, 0, sheet.aw, sheet.ah], leaves, 0);
+    leaves.forEach(function (r) {
+      var t = trimRect(mask, r);
+      if (t) trimmed.push(t);
+    });
+    return sortReading(mergeSmall(trimmed));
+  }
+
+  /* ----------------------------------------------------- blobs: labels */
+
+  /* Separable box dilation — joins the letters of a caption into one strip
+     and bridges the flat-coloured seams inside a photograph. */
+  function dilate(mask, r) {
+    if (r < 1) return mask;
+    var aw = sheet.aw, ah = sheet.ah, n = aw * ah;
+    var tmp = new Uint8Array(n), out = new Uint8Array(n), x, y, k, i;
+    for (y = 0; y < ah; y++) {
+      for (x = 0; x < aw; x++) {
+        for (k = -r; k <= r; k++) {
+          i = x + k;
+          if (i >= 0 && i < aw && mask[y * aw + i]) { tmp[y * aw + x] = 1; break; }
+        }
+      }
+    }
+    for (y = 0; y < ah; y++) {
+      for (x = 0; x < aw; x++) {
+        for (k = -r; k <= r; k++) {
+          i = y + k;
+          if (i >= 0 && i < ah && tmp[i * aw + x]) { out[y * aw + x] = 1; break; }
+        }
+      }
+    }
+    return out;
+  }
+
+  function fuseOverlaps(rects) {
+    var list = rects.slice(), guard = 0, changed = true;
+    while (changed && guard++ < rects.length + 5) {
+      changed = false;
+      for (var i = 0; i < list.length && !changed; i++) {
+        for (var j = i + 1; j < list.length; j++) {
+          var a = list[i], b = list[j];
+          if (a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]) {
+            list[i] = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+            list.splice(j, 1);
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    return list;
+  }
+
+  function blobRects(mask) {
+    var aw = sheet.aw, ah = sheet.ah, n = aw * ah;
+    var r = Math.max(1, Math.round(sopt.minGutter * sheet.ascale / 2));
+    var m = dilate(mask, r);
+    var seen = new Uint8Array(n), stack = new Int32Array(n), rects = [];
+    var minPx = (sopt.minArea / 1000) * n;
+
+    for (var s = 0; s < n; s++) {
+      if (!m[s] || seen[s]) continue;
+      var sp = 0;
+      stack[sp++] = s; seen[s] = 1;
+      var x0 = s % aw, x1 = x0, y0 = (s / aw) | 0, y1 = y0;
+      while (sp) {
+        var p = stack[--sp], px = p % aw, py = (p / aw) | 0;
+        if (px < x0) x0 = px; else if (px > x1) x1 = px;
+        if (py > y1) y1 = py;
+        if (px > 0 && m[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
+        if (px < aw - 1 && m[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
+        if (py > 0 && m[p - aw] && !seen[p - aw]) { seen[p - aw] = 1; stack[sp++] = p - aw; }
+        if (py < ah - 1 && m[p + aw] && !seen[p + aw]) { seen[p + aw] = 1; stack[sp++] = p + aw; }
+      }
+      rects.push([x0, y0, x1 + 1, y1 + 1]);
+    }
+
+    /* undo the dilation, fuse what still overlaps, then drop the specks */
+    rects = rects.map(function (b) {
+      return [clamp(b[0] + r, 0, aw), clamp(b[1] + r, 0, ah), clamp(b[2] - r, 0, aw), clamp(b[3] - r, 0, ah)];
+    }).filter(function (b) { return b[2] > b[0] && b[3] > b[1]; });
+
+    rects = fuseOverlaps(rects).filter(function (b) {
+      return (b[2] - b[0]) * (b[3] - b[1]) >= minPx;
+    });
+    return sortReading(mergeSmall(rects));
+  }
+
+  function gridRects() {
+    var rows = clamp(sopt.rows | 0, 1, 24), cols = clamp(sopt.cols | 0, 1, 24), out = [];
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        out.push([
+          Math.round(c * sheet.aw / cols), Math.round(r * sheet.ah / rows),
+          Math.round((c + 1) * sheet.aw / cols), Math.round((r + 1) * sheet.ah / rows)
+        ]);
+      }
+    }
+    return out;
+  }
+
+  /* analysis-space rect -> padded, normalised box */
+  function toBox(r) {
+    var p = sopt.pad * sheet.ascale;
+    var x0 = clamp(r[0] - p, 0, sheet.aw), y0 = clamp(r[1] - p, 0, sheet.ah);
+    var x1 = clamp(r[2] + p, 0, sheet.aw), y1 = clamp(r[3] + p, 0, sheet.ah);
+    if (x1 <= x0) x1 = Math.min(sheet.aw, x0 + 1);
+    if (y1 <= y0) y1 = Math.min(sheet.ah, y0 + 1);
+    return {
+      id: uid(),
+      x: x0 / sheet.aw, y: y0 / sheet.ah,
+      w: (x1 - x0) / sheet.aw, h: (y1 - y0) / sheet.ah
+    };
+  }
+
+  function detect() {
+    if (!sheet.img) return;
+    if (sopt.mode === 'manual') { renderBoxes(); renderPieces(); return; }
+
+    var t0 = Date.now(), rects;
+    if (sopt.mode === 'grid') rects = gridRects();
+    else {
+      var mask = inkMask();
+      rects = sopt.mode === 'blobs' ? blobRects(mask) : cutRects(mask);
+    }
+
+    sheet.boxes = rects.map(toBox);
+    sheet.sel = null;
+    renderBoxes();
+    renderPieces();
+
+    var n = sheet.boxes.length;
+    setStatus(n
+      ? n + ' piece' + (n === 1 ? '' : 's') + ' found in ' + (Date.now() - t0) + ' ms — adjust the boxes if you like'
+      : 'Nothing found — try another mode, or loosen the tolerance', n ? 'good' : 'bad');
+  }
+
+  /* ------------------------------------------------------------ pieces */
+
+  function cropCanvas(b, maxSide) {
+    var sx = clamp(Math.round(b.x * sheet.w), 0, sheet.w - 1);
+    var sy = clamp(Math.round(b.y * sheet.h), 0, sheet.h - 1);
+    var sw = clamp(Math.round(b.w * sheet.w), 1, sheet.w - sx);
+    var sh = clamp(Math.round(b.h * sheet.h), 1, sheet.h - sy);
+    var dw = sw, dh = sh;
+    if (maxSide) {
+      var s = Math.min(1, maxSide / Math.max(sw, sh));
+      dw = Math.max(1, Math.round(sw * s));
+      dh = Math.max(1, Math.round(sh * s));
+    }
+    var c = document.createElement('canvas');
+    c.width = dw; c.height = dh;
+    var x = c.getContext('2d');
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(sheet.img, sx, sy, sw, sh, 0, 0, dw, dh);
+    return { canvas: c, w: sw, h: sh };
+  }
+
+  function piece(b, maxSide) {
+    var c = cropCanvas(b, maxSide);
+    return {
+      url: sheet.mime === 'image/png'
+        ? c.canvas.toDataURL('image/png')
+        : c.canvas.toDataURL(sheet.mime, 0.92),
+      w: c.w, h: c.h
+    };
+  }
+
+  function pieceName(i) {
+    return safeName(stripExt(sheet.name), 'sheet') + '-' +
+      String(i + 1).padStart(2, '0') + '.' + extFor(sheet.mime);
+  }
+
+  function boxById(id) {
+    return sheet.boxes.filter(function (b) { return b.id === id; })[0];
+  }
+
+  function renderBoxes() {
+    $('#boxes').innerHTML = sheet.boxes.map(function (b, i) {
+      return '<div class="box' + (b.id === sheet.sel ? ' is-on' : '') + '" data-box="' + b.id + '" style="' +
+          'left:' + (b.x * 100).toFixed(4) + '%;top:' + (b.y * 100).toFixed(4) + '%;' +
+          'width:' + (b.w * 100).toFixed(4) + '%;height:' + (b.h * 100).toFixed(4) + '%">' +
+        '<span class="box-n">' + (i + 1) + '</span>' +
+        '<i class="hnd hnd-nw" data-h="nw"></i><i class="hnd hnd-ne" data-h="ne"></i>' +
+        '<i class="hnd hnd-sw" data-h="sw"></i><i class="hnd hnd-se" data-h="se"></i>' +
+      '</div>';
+    }).join('');
+
+    var n = sheet.boxes.length;
+    $('#spCount').textContent = String(n);
+    $('#pieceBadge').textContent = String(n);
+    $('#splitZip').disabled = !n;
+    $('#toEncoder').disabled = !n;
+    $('#clearBoxes').disabled = !n;
+  }
+
+  function renderPieces() {
+    var list = $('#pieceList');
+    if (!sheet.boxes.length) { list.innerHTML = ''; return; }
+    list.innerHTML = sheet.boxes.map(function (b, i) {
+      var p = piece(b, 96);
+      return '<li class="item' + (b.id === sheet.sel ? ' is-sel' : '') + '" data-piece="' + b.id + '">' +
+        '<img class="item-thumb" src="' + p.url + '" alt="" data-zoomp="' + b.id + '">' +
+        '<div class="item-head"><span class="item-name">' + esc(pieceName(i)) + '</span></div>' +
+        '<div class="item-tools">' +
+          '<button type="button" class="btn-icon" data-pact="save" data-id="' + b.id + '" title="Save this piece">&#8595;</button>' +
+          '<button type="button" class="btn-icon" data-pact="del" data-id="' + b.id + '" title="Remove">&#215;</button>' +
+        '</div>' +
+        '<div class="item-pc">' + p.w + '×' + p.h + ' px</div>' +
+      '</li>';
+    }).join('');
+  }
+
+  function sendToEncoder() {
+    if (!sheet.boxes.length) return;
+    setStatus('Cropping ' + sheet.boxes.length + ' pieces…');
+
+    /* the first real image replaces the seeded samples, as a drop does */
+    if (state.items.length && state.items.every(function (i) { return i.sample; })) state.items = [];
+
+    var n = sheet.boxes.length;
+    sheet.boxes.forEach(function (b, i) {
+      var p = piece(b, 0), name = pieceName(i);
+      state.items.push({
+        id: uid(), name: name, descr: stripExt(name), sample: false,
+        src: p.url, mime: dataUrlMime(p.url) || sheet.mime, origBytes: dataUrlBytes(p.url),
+        origW: p.w, origH: p.h, status: 'ok', note: ''
+      });
+    });
+
+    setMode('encode');
+    reprocessAll().then(function () {
+      setStatus(n + ' piece' + (n === 1 ? '' : 's') + ' added to the encoder', 'good');
+    });
+  }
+
+  /* ------------------------------------------------------- stage input */
+
+  function stageMetrics() {
+    var r = $('#sheetImg').getBoundingClientRect();
+    return { left: r.left, top: r.top, w: r.width || 1, h: r.height || 1 };
+  }
+
+  function setPicking(on) {
+    sheet.picking = on;
+    $('#stage').classList.toggle('is-picking', on);
+    $('#bgPick').classList.toggle('is-on', on);
+  }
+
+  function pickAt(e) {
+    var m = stageMetrics();
+    var ax = Math.floor(clamp((e.clientX - m.left) / m.w, 0, 0.999) * sheet.aw);
+    var ay = Math.floor(clamp((e.clientY - m.top) / m.h, 0, 0.999) * sheet.ah);
+    var p = (ay * sheet.aw + ax) * 4;
+    sheet.bg = [sheet.data[p], sheet.data[p + 1], sheet.data[p + 2]];
+    $('#bgColor').value = rgb2hex(sheet.bg);
+    setPicking(false);
+    detect();
+  }
+
+  function bindStage() {
+    var host = $('#boxes'), drag = null;
+
+    host.addEventListener('pointerdown', function (e) {
+      if (!sheet.img) return;
+      e.preventDefault();
+      if (sheet.picking) { pickAt(e); return; }
+
+      var m = stageMetrics();
+      var nx = clamp((e.clientX - m.left) / m.w, 0, 1);
+      var ny = clamp((e.clientY - m.top) / m.h, 0, 1);
+      var boxEl = e.target.closest('.box'), hnd = e.target.closest('.hnd');
+      host.setPointerCapture(e.pointerId);
+
+      if (boxEl) {
+        var b = boxById(boxEl.getAttribute('data-box'));
+        sheet.sel = b.id;
+        drag = hnd
+          ? { kind: 'size', b: b, h: hnd.getAttribute('data-h'), s: { x: b.x, y: b.y, w: b.w, h: b.h } }
+          : { kind: 'move', b: b, ox: nx - b.x, oy: ny - b.y };
+      } else {
+        var nb = { id: uid(), x: nx, y: ny, w: 0, h: 0 };
+        sheet.boxes.push(nb);
+        sheet.sel = nb.id;
+        drag = { kind: 'draw', b: nb, ax: nx, ay: ny };
+      }
+      renderBoxes();
+    });
+
+    host.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      var m = stageMetrics();
+      var nx = clamp((e.clientX - m.left) / m.w, 0, 1);
+      var ny = clamp((e.clientY - m.top) / m.h, 0, 1);
+      var b = drag.b;
+
+      if (drag.kind === 'move') {
+        b.x = clamp(nx - drag.ox, 0, 1 - b.w);
+        b.y = clamp(ny - drag.oy, 0, 1 - b.h);
+      } else if (drag.kind === 'draw') {
+        b.x = Math.min(drag.ax, nx); b.w = Math.abs(nx - drag.ax);
+        b.y = Math.min(drag.ay, ny); b.h = Math.abs(ny - drag.ay);
+      } else {
+        var s = drag.s, west = drag.h.charAt(1) === 'w', north = drag.h.charAt(0) === 'n';
+        var x0 = west ? nx : s.x, x1 = west ? s.x + s.w : nx;
+        var y0 = north ? ny : s.y, y1 = north ? s.y + s.h : ny;
+        b.x = Math.min(x0, x1); b.w = Math.abs(x1 - x0);
+        b.y = Math.min(y0, y1); b.h = Math.abs(y1 - y0);
+      }
+      renderBoxes();
+    });
+
+    function endDrag() {
+      if (!drag) return;
+      var b = drag.b;
+      /* a stray click, or a box dragged down to nothing, is not a piece */
+      if (b.w * sheet.w < 8 || b.h * sheet.h < 8) {
+        sheet.boxes = sheet.boxes.filter(function (x) { return x !== b; });
+        if (sheet.sel === b.id) sheet.sel = null;
+      }
+      drag = null;
+      renderBoxes();
+      renderPieces();
+    }
+    host.addEventListener('pointerup', endDrag);
+    host.addEventListener('pointercancel', endDrag);
+  }
+
+  function syncFields() {
+    var auto = sopt.mode === 'gutters' || sopt.mode === 'blobs';
+    Array.prototype.forEach.call(document.querySelectorAll('#pane-split [data-for]'), function (el) {
+      el.hidden = el.getAttribute('data-for') === 'auto' ? !auto : sopt.mode !== 'grid';
+    });
+    $('#reDetect').disabled = !sheet.img || sopt.mode === 'manual';
+    $('#addBox').disabled = !sheet.img;
+    $('#detectHint').textContent = HINTS[sopt.mode];
+  }
+
+  function bindSplit() {
+    var dz = $('#sheetDrop'), fi = $('#sheetInput');
+    dz.addEventListener('click', function () { fi.click(); });
+    dz.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fi.click(); }
+    });
+    fi.addEventListener('change', function () { loadSheet(fi.files[0]); fi.value = ''; });
+
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('is-over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('is-over'); });
+    });
+    dz.addEventListener('drop', function (e) {
+      if (e.dataTransfer && e.dataTransfer.files.length) loadSheet(e.dataTransfer.files[0]);
+    });
+
+    var redetect = debounce(detect, 140);
+    $('#detectMode').addEventListener('change', function () {
+      sopt.mode = this.value;
+      syncFields();
+      detect();
+    });
+    $('#tol').addEventListener('input', function () {
+      sopt.tol = +this.value; $('#tolVal').textContent = this.value; redetect();
+    });
+    $('#minGutter').addEventListener('input', function () {
+      sopt.minGutter = +this.value; $('#gutVal').textContent = this.value + ' px'; redetect();
+    });
+    $('#minArea').addEventListener('input', function () {
+      sopt.minArea = +this.value;
+      $('#minVal').textContent = (this.value / 10).toFixed(1) + '%';
+      redetect();
+    });
+    $('#pad').addEventListener('input', function () {
+      sopt.pad = +this.value; $('#padVal').textContent = this.value + ' px'; redetect();
+    });
+    $('#gridRows').addEventListener('input', function () { sopt.rows = +this.value; redetect(); });
+    $('#gridCols').addEventListener('input', function () { sopt.cols = +this.value; redetect(); });
+    $('#mergeThin').addEventListener('change', function () { sopt.mergeThin = this.checked; detect(); });
+    $('#bgColor').addEventListener('input', function () { sheet.bg = hex2rgb(this.value); redetect(); });
+    $('#bgPick').addEventListener('click', function () { setPicking(!sheet.picking); });
+    $('#reDetect').addEventListener('click', detect);
+
+    $('#addBox').addEventListener('click', function () {
+      if (!sheet.img) return;
+      var b = { id: uid(), x: 0.3, y: 0.3, w: 0.25, h: 0.25 };
+      sheet.boxes.push(b);
+      sheet.sel = b.id;
+      renderBoxes();
+      renderPieces();
+    });
+    $('#clearBoxes').addEventListener('click', function () {
+      sheet.boxes = []; sheet.sel = null;
+      renderBoxes(); renderPieces();
+      setStatus('Boxes cleared — draw your own on the sheet');
+    });
+
+    $('#pieceList').addEventListener('click', function (e) {
+      var zoom = e.target.closest('[data-zoomp]');
+      if (zoom) {
+        var zb = boxById(zoom.getAttribute('data-zoomp'));
+        if (zb) {
+          var zi = sheet.boxes.indexOf(zb), zp = piece(zb, 1400);
+          openLightbox(zp.url, pieceName(zi) + ' · ' + zp.w + '×' + zp.h);
+        }
+        return;
+      }
+      var btn = e.target.closest('[data-pact]');
+      if (!btn) {
+        var li = e.target.closest('[data-piece]');
+        if (li) { sheet.sel = li.getAttribute('data-piece'); renderBoxes(); renderPieces(); }
+        return;
+      }
+      var b = boxById(btn.getAttribute('data-id')), idx = sheet.boxes.indexOf(b);
+      if (idx < 0) return;
+      if (btn.getAttribute('data-pact') === 'del') {
+        sheet.boxes.splice(idx, 1);
+        if (sheet.sel === b.id) sheet.sel = null;
+        renderBoxes(); renderPieces();
+        return;
+      }
+      var out = piece(b, 0);
+      saveBlob(new Blob([dataUrlToBytes(out.url)], { type: dataUrlMime(out.url) || sheet.mime }), pieceName(idx));
+    });
+
+    $('#splitZip').addEventListener('click', function () {
+      if (!sheet.boxes.length) return;
+      var entries = sheet.boxes.map(function (b, i) {
+        return { name: pieceName(i), bytes: dataUrlToBytes(piece(b, 0).url) };
+      });
+      saveBlob(zipStore(entries), safeName(stripExt(sheet.name), 'sheet') + '-pieces.zip');
+    });
+    $('#toEncoder').addEventListener('click', sendToEncoder);
+
+    bindStage();
+    syncFields();
+  }
+
   /* =========================================================== ENCODE  */
 
   function addSamples() {
@@ -667,7 +1383,7 @@
 
   function setMode(mode) {
     state.mode = mode;
-    ['encode', 'decode'].forEach(function (m) {
+    ['split', 'encode', 'decode'].forEach(function (m) {
       var on = m === mode;
       var tab = $('#tab-' + m);
       tab.classList.toggle('is-on', on);
@@ -701,6 +1417,7 @@
     dnote.className = 'hint';
     dnote.innerHTML = '<span class="dl-note">' + note + '</span>';
     $('#pane-decode .col-out').insertBefore(dnote, $('#gallery'));
+    $('#stageHint').lastElementChild.textContent = note;
 
     /* An artifact host brokers saves on the page's behalf; it resolves
        late, or never on an ordinary web page. */
@@ -709,6 +1426,7 @@
         if (!dl) return;
         hostSave = dl;
         $('#downloadZip').hidden = true;   /* .zip is not an accepted type there */
+        $('#splitZip').hidden = true;
         Array.prototype.forEach.call(document.querySelectorAll('.dl-note'), function (el) {
           el.textContent = 'Saving asks for your confirmation here, and .zip is not an accepted file type — save images one at a time.';
         });
@@ -748,9 +1466,11 @@
     window.addEventListener('drop', function (e) { e.preventDefault(); });
 
     document.addEventListener('paste', function (e) {
-      if (state.mode !== 'encode' || !e.clipboardData) return;
+      if (!e.clipboardData) return;
       var files = Array.prototype.slice.call(e.clipboardData.files);
-      if (files.length) { e.preventDefault(); addFiles(files); }
+      if (!files.length) return;
+      if (state.mode === 'encode') { e.preventDefault(); addFiles(files); }
+      else if (state.mode === 'split') { e.preventDefault(); loadSheet(files[0]); }
     });
 
     /* ---- options ---- */
@@ -862,6 +1582,8 @@
     $('#lightbox').addEventListener('click', function (e) {
       if (e.target === this) this.close();
     });
+
+    bindSplit();
 
     /* ---- open in a working state ---- */
     addSamples();
